@@ -29,6 +29,12 @@ module write_buffer #(
 
     assign full = (count == ENTRIES);
 
+    // If a write and a consume land on the same cycle, the new
+    // entry must go into the slot the shift below leaves open
+    // (count-1), not the old tail (count) -- otherwise the two
+    // assignments target the same register and collide.
+    wire [2:0] write_index = (consume && count != 0) ? count - 1 : count;
+
     always @(posedge clk or posedge reset) begin
         if (reset) begin
             count <= 0;
@@ -40,14 +46,7 @@ module write_buffer #(
         end
         else begin
 
-            // Add new write
-            if (write_valid && !full) begin
-                address[count] <= write_addr;
-                data[count] <= write_data;
-                count <= count + 1;
-            end
-
-            // Remove oldest write
+            // Remove oldest write first
             if (consume && count != 0) begin
 
                 for (i = 0; i < ENTRIES-1; i = i + 1) begin
@@ -55,8 +54,28 @@ module write_buffer #(
                     data[i] <= data[i+1];
                 end
 
-                count <= count - 1;
             end
+
+            // Add new write (ordered after the shift above, so
+            // this assignment wins if both target the same slot
+            // in the same cycle)
+            if (write_valid && !full) begin
+                address[write_index] <= write_addr;
+                data[write_index] <= write_data;
+            end
+
+            // Update count exactly once. Previously this was two
+            // separate non-blocking assignments to `count` (one
+            // per if-block); when write and consume both fired in
+            // the same cycle, the second silently overrode the
+            // first instead of netting to "no change".
+            if (write_valid && !full && consume && count != 0)
+                count <= count;
+            else if (write_valid && !full)
+                count <= count + 1;
+            else if (consume && count != 0)
+                count <= count - 1;
+
         end
     end
 

@@ -72,6 +72,19 @@ module l1_cache #(
     integer i;
 
     // --------------------------------------------------
+    // Line fill (miss) state
+    // --------------------------------------------------
+    // A miss now fetches the WHOLE line from L2, one word
+    // per cycle (fill_word = 0..3), instead of only the
+    // single requested word. This fixes stale/garbage data
+    // being left in the other words of a newly-allocated line.
+
+    reg filling;
+    reg [1:0] fill_word;
+
+    wire [1:0] cur_fill_word = filling ? fill_word : 2'b00;
+
+    // --------------------------------------------------
     // Search cache
     // --------------------------------------------------
 
@@ -108,6 +121,9 @@ module l1_cache #(
             l2_write <= 0;
 
             lru_access_valid <= 0;
+
+            filling <= 1'b0;
+            fill_word <= 2'b00;
 
             for (i = 0; i < SETS; i = i + 1) begin
                 valid[i][0] <= 0;
@@ -165,25 +181,45 @@ module l1_cache #(
 
                 else begin
 
+                    filling <= 1'b1;
+
                     l2_valid <= 1'b1;
                     l2_write <= 1'b0;
-                    l2_addr <= cpu_addr;
+                    l2_addr <= {cpu_addr[ADDR_WIDTH-1:4], cur_fill_word, 2'b00};
 
                     // Wait for L2
                     if (l2_ready) begin
 
-                        // Replace LRU way
+                        // Fill this word of the line
                         tag[index][lru_way] <= tag_value;
-                        valid[index][lru_way] <= 1'b1;
+                        data[index][lru_way][cur_fill_word] <= l2_read_data;
 
-                        data[index][lru_way][word_offset] <=
-                            l2_read_data;
+                        if (cur_fill_word == word_offset)
+                            cpu_read_data <= l2_read_data;
 
-                        cpu_read_data <= l2_read_data;
-                        cpu_ready <= 1'b1;
+                        if (cur_fill_word == 2'b11) begin
 
-                        lru_access_valid <= 1'b1;
-                        lru_access_way <= lru_way;
+                            // Whole line is now valid
+                            valid[index][lru_way] <= 1'b1;
+                            filling <= 1'b0;
+
+                            // Read miss: done now. Write miss: don't
+                            // complete yet -- next cycle this address
+                            // now HITS (valid+tag match), so the
+                            // write-hit path above applies
+                            // cpu_write_data and forwards it to L2
+                            // (write-allocate), instead of the write
+                            // being silently dropped.
+                            if (!cpu_write) begin
+                                cpu_ready <= 1'b1;
+                                lru_access_valid <= 1'b1;
+                                lru_access_way <= lru_way;
+                            end
+
+                        end
+                        else begin
+                            fill_word <= cur_fill_word + 1'b1;
+                        end
 
                     end
 
