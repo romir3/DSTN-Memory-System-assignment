@@ -117,22 +117,30 @@ module memory_lru #(
                 IDLE: begin
                     busy <= 1'b0;
 
-                    if (access_valid && frame_valid[access_frame]) begin
-                        last_used[access_frame] <= lru_counter;
-                        lru_counter <= lru_counter + 1'b1;
+                    // Atomic LRU timestamp generation
+                    if (access_valid && frame_valid[access_frame] && frame_allocate) begin
+                        last_used[access_frame]   <= lru_counter;
+                        last_used[allocate_frame] <= lru_counter + 32'd1;
+                        lru_counter               <= lru_counter + 32'd2;
+                    end
+                    else if (access_valid && frame_valid[access_frame]) begin
+                        last_used[access_frame]   <= lru_counter;
+                        lru_counter               <= lru_counter + 32'd1;
+                    end
+                    else if (frame_allocate) begin
+                        last_used[allocate_frame] <= lru_counter;
+                        lru_counter               <= lru_counter + 32'd1;
                     end
 
+                    // Frame metadata allocation
                     if (frame_allocate) begin
                         frame_valid[allocate_frame] <= 1'b1;
-                        frame_pid[allocate_frame] <= allocate_pid;
-                        frame_vpn[allocate_frame] <= allocate_vpn;
+                        frame_pid[allocate_frame]   <= allocate_pid;
+                        frame_vpn[allocate_frame]   <= allocate_vpn;
                         frame_dirty[allocate_frame] <= 1'b0;
-                        last_used[allocate_frame] <= lru_counter;
 
                         process_page_count[allocate_pid] <=
                             process_page_count[allocate_pid] + 1'b1;
-
-                        lru_counter <= lru_counter + 1'b1;
                     end
 
                     if (dirty_update_valid && frame_valid[dirty_frame]) begin
