@@ -6,12 +6,12 @@
 `include "page_table.v"
 `include "frame_table.v"
 
-module mmu_controller #(
-    parameter PID_WIDTH  = 3,
+module mmu_top #(
+    parameter PID_WIDTH  = 8,
     parameter NUM_FRAMES = 1024
 )(
     input  wire                  clk,
-    input  wire                  rst_n,
+    input  wire                  reset,
 
     input  wire                  start_translate,
     input  wire [31:0]           va_in,
@@ -20,27 +20,29 @@ module mmu_controller #(
 
     output reg  [25:0]           pa_out,
     output reg                   pa_ready,
-    output reg                   page_fault,
     output reg                   seg_fault,
-    output reg  [14:0]           fault_vpn,
     output reg                   busy,
+
+    output reg                   page_fault,
+    output reg  [14:0]           fault_page,
+    output reg  [PID_WIDTH-1:0]  fault_pid,
+
+    input  wire                  page_table_invalidate,
+    input  wire [PID_WIDTH-1:0]  invalidate_pid,
+    input  wire [14:0]           invalidate_vpn,
+
+    input  wire                  page_table_update,
+    input  wire [PID_WIDTH-1:0]  update_pid,
+    input  wire [14:0]           update_vpn,
+    input  wire [15:0]           update_frame,
 
     input  wire                  os_seg_write_en,
     input  wire [6:0]            os_write_seg_num,
     input  wire [15:0]           os_write_pt_base,
-    input  wire                  os_seg_write_valid,
-
-    input  wire                  os_page_write_en,
-    input  wire [15:0]           os_write_page_pt_base,
-    input  wire [14:0]           os_write_vpn,
-    input  wire [15:0]           os_write_pfn,
-    input  wire                  os_page_write_valid,
-
-    input  wire                  os_frame_free_en,
-    input  wire [15:0]           os_frame_free_pfn,
-    input  wire [PID_WIDTH-1:0]  quota_query_pid,
-    output wire [15:0]           quota_frame_count
+    input  wire                  os_seg_write_valid
 );
+
+    wire rst_n = ~reset;
 
     reg [31:0] va_reg;
     wire [6:0]  seg_num;
@@ -89,6 +91,12 @@ module mmu_controller #(
 
     reg         ft_touch_en;
     reg  [15:0] ft_touch_pfn;
+
+    wire        pt_write_en    = page_table_update | page_table_invalidate;
+    wire        pt_write_valid = page_table_update;
+    wire [14:0] pt_write_vpn   = page_table_update ? update_vpn : invalidate_vpn;
+    wire [15:0] pt_write_pfn   = update_frame;
+    wire [15:0] pt_write_base  = 16'h0000;
 
     l1_tlb l1_tlb_inst (
         .clk(clk),
@@ -139,11 +147,11 @@ module mmu_controller #(
         .pfn(page_pfn),
         .page_valid(page_valid),
         .page_fault(page_fault_wire),
-        .write_en(os_page_write_en),
-        .write_pt_base(os_write_page_pt_base),
-        .write_vpn(os_write_vpn),
-        .write_pfn(os_write_pfn),
-        .write_valid(os_page_write_valid)
+        .write_en(pt_write_en),
+        .write_pt_base(pt_write_base),
+        .write_vpn(pt_write_vpn),
+        .write_pfn(pt_write_pfn),
+        .write_valid(pt_write_valid)
     );
 
     frame_table #(
@@ -157,16 +165,16 @@ module mmu_controller #(
         .query_frame_valid(),
         .query_frame_pid(),
         .query_last_used(),
-        .alloc_en(os_page_write_en),
-        .alloc_pfn(os_write_pfn),
-        .alloc_pid(current_pid),
-        .free_en(os_frame_free_en),
-        .free_pfn(os_frame_free_pfn),
+        .alloc_en(page_table_update),
+        .alloc_pfn(update_frame),
+        .alloc_pid(update_pid),
+        .free_en(page_table_invalidate),
+        .free_pfn(update_frame),
         .touch_en(ft_touch_en),
         .touch_pfn(ft_touch_pfn),
         .access_timestamp(global_timer),
-        .quota_query_pid(quota_query_pid),
-        .quota_frame_count(quota_frame_count)
+        .quota_query_pid(current_pid),
+        .quota_frame_count()
     );
 
     localparam S_IDLE       = 3'd0,
@@ -193,7 +201,8 @@ module mmu_controller #(
             pa_ready     <= 1'b0;
             page_fault   <= 1'b0;
             seg_fault    <= 1'b0;
-            fault_vpn    <= 15'd0;
+            fault_page   <= 15'd0;
+            fault_pid    <= {PID_WIDTH{1'b0}};
             busy         <= 1'b0;
             l1_write_en  <= 1'b0;
             l1_write_vpn <= 15'd0;
@@ -214,12 +223,12 @@ module mmu_controller #(
                     ft_touch_en <= 1'b0;
 
                     if (start_translate) begin
-                        va_reg    <= va_in;
-                        fault_vpn <= 15'd0;
-                        busy      <= 1'b1;
-                        state     <= S_L1_CHECK;
+                        va_reg     <= va_in;
+                        fault_page <= 15'd0;
+                        busy       <= 1'b1;
+                        state      <= S_L1_CHECK;
                     end else begin
-                        busy      <= 1'b0;
+                        busy       <= 1'b0;
                     end
                 end
 
@@ -268,7 +277,8 @@ module mmu_controller #(
                 S_PAGE_CHECK: begin
                     if (page_fault_wire) begin
                         page_fault <= 1'b1;
-                        fault_vpn  <= vpn;
+                        fault_page <= vpn;
+                        fault_pid  <= current_pid;
                         busy       <= 1'b0;
                         state      <= S_DONE;
                     end else if (page_valid) begin
@@ -292,7 +302,6 @@ module mmu_controller #(
                 end
 
                 S_DONE: begin
-
                     pa_ready    <= 1'b0;
                     page_fault  <= 1'b0;
                     seg_fault   <= 1'b0;
