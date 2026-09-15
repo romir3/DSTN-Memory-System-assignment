@@ -79,19 +79,26 @@ module disk_memory #(
                 READ: begin
                     busy <= 1'b1;
 
-                    page_data <= disk_memory[active_page][word_counter];
-                    page_data_valid <= 1'b1;
-
-                    if (page_data_ready) begin
+                    if (!page_data_valid) begin
+                        page_data <= disk_memory[active_page][word_counter];
+                        page_data_valid <= 1'b1;
+                    end
+                    else if (page_data_ready) begin
                         if (word_counter == PAGE_SIZE_WORDS - 1) begin
                             page_done <= 1'b1;
                             word_counter <= 8'd0;
+                            page_data_valid <= 1'b0;
                             busy <= 1'b0;
                             state <= IDLE;
                         end
                         else begin
                             word_counter <= word_counter + 1'b1;
+                            page_data <= disk_memory[active_page][word_counter + 1'b1];
+                            page_data_valid <= 1'b1;
                         end
+                    end
+                    else begin
+                        page_data_valid <= 1'b1;
                     end
                 end
 

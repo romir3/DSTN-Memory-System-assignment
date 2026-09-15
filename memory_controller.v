@@ -193,7 +193,7 @@ module memory_controller #(
         endcase
     end
 
-    always @(posedge clk or posedge reset) begin
+   always @(posedge clk)  begin
         if (reset) begin
             state <= IDLE;
 
