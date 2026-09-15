@@ -266,11 +266,14 @@ module mmu_top #(
 
                 S_SEG_CHECK: begin
                     if (seg_fault_wire) begin
-                        seg_fault <= 1'b1;
-                        busy      <= 1'b0;
-                        state     <= S_DONE;
+                        page_fault <= 1'b1;
+                        fault_page <= vpn;
+                        fault_pid  <= current_pid;
+                        seg_fault  <= 1'b0;
+                        busy       <= 1'b0;
+                        state      <= S_DONE;
                     end else if (seg_valid) begin
-                        state     <= S_PAGE_CHECK;
+                        state      <= S_PAGE_CHECK;
                     end
                 end
 
