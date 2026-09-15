@@ -9,7 +9,7 @@ module l2_cache #(
     input clk,
     input reset,
 
-    // L1 / upper-level interface
+    // L1 interface
     input upper_valid,
     input upper_write,
     input [ADDR_WIDTH-1:0] upper_addr,
@@ -28,9 +28,7 @@ module l2_cache #(
     input memory_ready
 );
 
-    // --------------------------------------------------
     // Cache storage
-    // --------------------------------------------------
 
     reg [13:0] tag [0:SETS-1][0:WAYS-1];
     reg valid [0:SETS-1][0:WAYS-1];
@@ -39,9 +37,7 @@ module l2_cache #(
     // 32 byte block = 8 words
     reg [DATA_WIDTH-1:0] data [0:SETS-1][0:WAYS-1][0:7];
 
-    // --------------------------------------------------
     // LRU Counter
-    // --------------------------------------------------
 
     reg lru_access_valid;
     reg [2:0] lru_access_way;
@@ -56,9 +52,7 @@ module l2_cache #(
         .lru_way(lru_way)
     );
 
-    // --------------------------------------------------
-    // Address fields
-    // --------------------------------------------------
+    // Address divisin
 
     wire [4:0] offset = upper_addr[4:0];
     wire [6:0] index = upper_addr[11:5];
@@ -71,15 +65,7 @@ module l2_cache #(
 
     integer i;
 
-    // --------------------------------------------------
     // Miss state: dirty-victim writeback + line fill
-    // --------------------------------------------------
-    // A miss now (a) writes the victim line back to memory
-    // first if it is dirty, then (b) fetches the WHOLE new
-    // line from memory one word per cycle (fill_word = 0..7).
-    // Previously a dirty victim was overwritten with no
-    // writeback (lost writes), and only a single word of the
-    // new line was ever loaded.
 
     reg evicting;
     reg filling;
@@ -89,9 +75,7 @@ module l2_cache #(
     wire in_evict = evicting || ((!evicting && !filling) && need_writeback);
     wire [2:0] cur_beat = (evicting || filling) ? fill_word : 3'b000;
 
-    // --------------------------------------------------
-    // Search L2
-    // --------------------------------------------------
+  // L2 search
 
     always @(*) begin
 
@@ -111,10 +95,6 @@ module l2_cache #(
         end
 
     end
-
-    // --------------------------------------------------
-    // Main operation
-    // --------------------------------------------------
 
     always @(posedge clk or posedge reset) begin
 
@@ -163,9 +143,7 @@ module l2_cache #(
 
             if (upper_valid) begin
 
-                // ======================================
-                // L2 HIT
-                // ======================================
+                //Hit
 
                 if (hit_found) begin
 
@@ -175,8 +153,7 @@ module l2_cache #(
 
                         data[index][hit_way][word_offset] <=
                             upper_write_data;
-
-                        // L2 is write-back
+                            
                         dirty[index][hit_way] <= 1'b1;
 
                     end
@@ -192,15 +169,12 @@ module l2_cache #(
 
                 end
 
-                // ======================================
-                // L2 MISS
-                // ======================================
+                //L2 Miss
 
                 else begin
 
                     if (in_evict) begin
 
-                        // ---- Write back dirty victim line first ----
                         memory_valid <= 1'b1;
                         memory_write <= 1'b1;
                         memory_addr <= {tag[index][lru_way], index, cur_beat, 2'b00};
@@ -224,7 +198,7 @@ module l2_cache #(
                     end
                     else begin
 
-                        // ---- Fetch new line from main memory ----
+                        //Fetch from MM
                         filling <= 1'b1;
 
                         memory_valid <= 1'b1;
@@ -241,18 +215,10 @@ module l2_cache #(
 
                             if (cur_beat == 3'd7) begin
 
-                                // Line fully loaded and clean
                                 valid[index][lru_way] <= 1'b1;
                                 dirty[index][lru_way] <= 1'b0;
                                 filling <= 1'b0;
 
-                                // Read miss: done now. Write miss:
-                                // don't complete yet -- next cycle
-                                // this address now HITS, so the
-                                // write-hit path above applies
-                                // upper_write_data and marks dirty
-                                // (write-allocate), instead of the
-                                // write being silently dropped.
                                 if (!upper_write) begin
                                     upper_ready <= 1'b1;
                                     lru_access_valid <= 1'b1;

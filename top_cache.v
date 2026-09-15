@@ -5,9 +5,7 @@ module top_cache #(
     input clk,
     input reset,
 
-    // ==================================================
-    // Interface with Person 1: MMU / TLB
-    // ==================================================
+    // Interface with Romir ie. MMU 
 
     input mmu_valid,
     input mmu_write,
@@ -18,9 +16,7 @@ module top_cache #(
     output mmu_ready,
     output mmu_hit,
 
-    // ==================================================
-    // Interface with Person 3: Main Memory
-    // ==================================================
+    // Interface with Sarath ie. Main Memory
 
     output memory_valid,
     output memory_write,
@@ -31,9 +27,7 @@ module top_cache #(
     input memory_ready
 );
 
-    // ==================================================
-    // L1 Cache <-> L2 Cache signals
-    // ==================================================
+    // L1 to L2 cache signals
 
     wire l2_valid;
     wire l2_write;
@@ -43,11 +37,6 @@ module top_cache #(
     wire [DATA_WIDTH-1:0] l2_read_data;
     wire l2_ready;
 
-
-    // ==================================================
-    // L1 Cache
-    // ==================================================
-
     l1_cache #(
         .ADDR_WIDTH(ADDR_WIDTH),
         .DATA_WIDTH(DATA_WIDTH)
@@ -55,7 +44,6 @@ module top_cache #(
         .clk(clk),
         .reset(reset),
 
-        // Person 1 / MMU side
         .cpu_valid(mmu_valid),
         .cpu_write(mmu_write),
         .cpu_addr(mmu_addr),
@@ -65,7 +53,6 @@ module top_cache #(
         .cpu_ready(mmu_ready),
         .cpu_hit(mmu_hit),
 
-        // L2 side
         .l2_valid(l2_valid),
         .l2_write(l2_write),
         .l2_addr(l2_addr),
@@ -74,11 +61,6 @@ module top_cache #(
         .l2_read_data(l2_read_data),
         .l2_ready(l2_ready)
     );
-
-
-    // ==================================================
-    // L2 Cache
-    // ==================================================
 
     l2_cache #(
         .ADDR_WIDTH(ADDR_WIDTH),

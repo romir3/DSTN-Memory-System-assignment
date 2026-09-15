@@ -4,11 +4,9 @@ module lru_square_matrix #(
     input clk,
     input reset,
 
-    // Way which was accessed recently
     input access_valid,
     input [1:0] access_way,
 
-    // Way selected for replacement
     output reg [1:0] lru_way
 );
 
@@ -25,8 +23,6 @@ module lru_square_matrix #(
             end
         end
         else if (access_valid) begin
-
-            // Accessed way becomes newer than every other way
             for (j = 0; j < WAYS; j = j + 1) begin
                 if (j != access_way) begin
                     matrix[access_way][j] <= 1'b1;
@@ -38,7 +34,6 @@ module lru_square_matrix #(
         end
     end
 
-    // A true LRU way has 0 in every column of its row
     always @(*) begin
         lru_way = 0;
 

@@ -9,7 +9,6 @@ module l1_cache #(
     input clk,
     input reset,
 
-    // CPU interface
     input cpu_valid,
     input cpu_write,
     input [ADDR_WIDTH-1:0] cpu_addr,
@@ -19,7 +18,6 @@ module l1_cache #(
     output reg cpu_ready,
     output reg cpu_hit,
 
-    // L2 interface
     output reg l2_valid,
     output reg l2_write,
     output reg [ADDR_WIDTH-1:0] l2_addr,
@@ -29,20 +27,10 @@ module l1_cache #(
     input l2_ready
 );
 
-    // --------------------------------------------------
-    // Cache storage
-    // --------------------------------------------------
-
     reg [14:0] tag [0:SETS-1][0:WAYS-1];
     reg valid [0:SETS-1][0:WAYS-1];
 
-    // One 32-bit word per location.
-    // 16-byte block = 4 words.
     reg [DATA_WIDTH-1:0] data [0:SETS-1][0:WAYS-1][0:3];
-
-    // --------------------------------------------------
-    // LRU
-    // --------------------------------------------------
 
     reg lru_access_valid;
     reg [1:0] lru_access_way;
@@ -56,9 +44,7 @@ module l1_cache #(
         .lru_way(lru_way)
     );
 
-    // --------------------------------------------------
-    // Address fields
-    // --------------------------------------------------
+    // Address division
 
     wire [3:0] offset = cpu_addr[3:0];
     wire [6:0] index = cpu_addr[10:4];
@@ -71,28 +57,14 @@ module l1_cache #(
 
     integer i;
 
-    // --------------------------------------------------
     // Line fill (miss) state
-    // --------------------------------------------------
-    // A miss now fetches the WHOLE line from L2, one word
-    // per cycle (fill_word = 0..3), instead of only the
-    // single requested word. This fixes stale/garbage data
-    // being left in the other words of a newly-allocated line.
 
     reg filling;
     reg [1:0] fill_word;
 
     wire [1:0] cur_fill_word = filling ? fill_word : 2'b00;
 
-    // --------------------------------------------------
     // Write buffer
-    // --------------------------------------------------
-    // Write hits are pushed here instead of being pulsed onto
-    // the L2 bus directly, so a write is never lost just because
-    // L2 wasn't ready the exact cycle of the hit. The buffer is
-    // drained to L2 in the background (see the main always block)
-    // whenever the bus isn't busy with a line fill.
-
     reg draining;
     reg buf_consume;
 
@@ -119,10 +91,6 @@ module l1_cache #(
         .consume_data(buf_consume_data)
     );
 
-    // --------------------------------------------------
-    // Search cache
-    // --------------------------------------------------
-
     always @(*) begin
 
         hit_found = 1'b0;
@@ -139,10 +107,6 @@ module l1_cache #(
         end
 
     end
-
-    // --------------------------------------------------
-    // Main cache operation
-    // --------------------------------------------------
 
     always @(posedge clk or posedge reset) begin
 
@@ -179,19 +143,7 @@ module l1_cache #(
             lru_access_valid <= 0;
             buf_consume <= 0;
 
-            // The L2 bus is shared between line fills and write-buffer
-            // drains, so only one of the branches below runs per cycle.
-            // An in-progress fill always wins (it must not be
-            // interrupted mid-burst); a drain-in-progress is next;
-            // then a CPU hit (never stalled by a drain); then starting
-            // a new drain if the buffer has something to send; and
-            // finally starting a new miss fill.
-
             if (filling) begin
-
-                // -------------------------------
-                // CONTINUE LINE FILL
-                // -------------------------------
 
                 l2_valid <= 1'b1;
                 l2_write <= 1'b0;
@@ -210,12 +162,6 @@ module l1_cache #(
                         valid[index][lru_way] <= 1'b1;
                         filling <= 1'b0;
 
-                        // Read miss: done now. Write miss: don't
-                        // complete yet -- next cycle this address
-                        // now HITS (valid+tag match), so the
-                        // write-hit path below applies
-                        // cpu_write_data (write-allocate) instead
-                        // of the write being silently dropped.
                         if (!cpu_write) begin
                             cpu_ready <= 1'b1;
                             lru_access_valid <= 1'b1;
@@ -233,10 +179,6 @@ module l1_cache #(
 
             else if (draining) begin
 
-                // -------------------------------
-                // CONTINUE WRITE-BUFFER DRAIN
-                // -------------------------------
-
                 l2_valid <= 1'b1;
                 l2_write <= 1'b1;
                 l2_addr <= buf_consume_addr;
@@ -251,13 +193,10 @@ module l1_cache #(
 
             else if (cpu_valid && hit_found) begin
 
-                // -------------------------------
-                // CACHE HIT
-                // -------------------------------
+                // cache hit
 
                 if (cpu_write && buf_full) begin
-                    // Write buffer is full -- stall this write and
-                    // retry next cycle instead of dropping it.
+                    // stall
                 end
                 else begin
 
@@ -268,10 +207,6 @@ module l1_cache #(
 
                         data[index][hit_way][word_offset] <=
                             cpu_write_data;
-
-                        // Pushed into the write buffer via
-                        // hit_write_accept above; drained to L2 in
-                        // the background instead of sent directly.
 
                     end
                     else begin
@@ -290,10 +225,6 @@ module l1_cache #(
 
             else if (buf_consume_valid) begin
 
-                // -------------------------------
-                // START WRITE-BUFFER DRAIN
-                // -------------------------------
-
                 draining <= 1'b1;
 
                 l2_valid <= 1'b1;
@@ -309,10 +240,6 @@ module l1_cache #(
             end
 
             else if (cpu_valid && !hit_found) begin
-
-                // -------------------------------
-                // START LINE FILL (CACHE MISS)
-                // -------------------------------
 
                 filling <= 1'b1;
 

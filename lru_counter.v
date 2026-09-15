@@ -21,7 +21,6 @@ module lru_counter #(
         end
         else if (access_valid) begin
 
-            // Accessed way becomes MRU
             for (i = 0; i < WAYS; i = i + 1) begin
 
                 if (i == access_way)
@@ -34,7 +33,6 @@ module lru_counter #(
         end
     end
 
-    // Find way with largest counter = LRU
     always @(*) begin
         lru_way = 0;
 
