@@ -4,33 +4,45 @@
 `include "l2_tlb.v"
 `include "segment.v"
 `include "page_table.v"
-module mmu_controller (
-    input  wire        clk,
-    input  wire        rst_n,
+`include "frame_table.v"
+
+module mmu_controller #(
+    parameter PID_WIDTH  = 3,            // Supports up to 8 processes (0 to 7)
+    parameter NUM_FRAMES = 1024          // Number of physical frames
+)(
+    input  wire                  clk,
+    input  wire                  rst_n,
     
     // CPU Interface
-    input  wire        start_translate,
-    input  wire [31:0] va_in,
-    input  wire        preempt_pulse,       // Synchronous flush on context switch
+    input  wire                  start_translate,
+    input  wire [31:0]           va_in,
+    input  wire [PID_WIDTH-1:0]  current_pid,         // Active Process ID
+    input  wire                  preempt_pulse,       // Synchronous flush on context switch
     
     // Translation Results
-    output reg  [25:0] pa_out,
-    output reg         pa_ready,
-    output reg         page_fault,
-    output reg         seg_fault,
-    output reg         busy,
+    output reg  [25:0]           pa_out,
+    output reg                   pa_ready,
+    output reg                   page_fault,
+    output reg                   seg_fault,
+    output reg                   busy,
 
     // OS Maintenance / Table Write Pass-Through Interface
-    input  wire        os_seg_write_en,
-    input  wire [6:0]  os_write_seg_num,
-    input  wire [15:0] os_write_pt_base,
-    input  wire        os_seg_write_valid,
+    input  wire                  os_seg_write_en,
+    input  wire [6:0]            os_write_seg_num,
+    input  wire [15:0]           os_write_pt_base,
+    input  wire                  os_seg_write_valid,
 
-    input  wire        os_page_write_en,
-    input  wire [15:0] os_write_page_pt_base,
-    input  wire [14:0] os_write_vpn,
-    input  wire [15:0] os_write_pfn,
-    input  wire        os_page_write_valid
+    input  wire                  os_page_write_en,
+    input  wire [15:0]           os_write_page_pt_base,
+    input  wire [14:0]           os_write_vpn,
+    input  wire [15:0]           os_write_pfn,
+    input  wire                  os_page_write_valid,
+
+    // OS Frame Table Maintenance & Quota Query Interface
+    input  wire                  os_frame_free_en,    // Pulse to deallocate/evict frame
+    input  wire [15:0]           os_frame_free_pfn,   // Target frame to free
+    input  wire [PID_WIDTH-1:0]  quota_query_pid,     // Query frame count for PID
+    output wire [15:0]           quota_frame_count    // Total frames owned by query PID
 );
 
     // =========================================================================
@@ -49,7 +61,19 @@ module mmu_controller (
     );
 
     // =========================================================================
-    // 2. Submodule Interconnect Wires & Registers
+    // 2. Global Timestamp Counter (For LRU Tracking in Frame Table)
+    // =========================================================================
+    reg [31:0] global_timer;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            global_timer <= 32'd0;
+        else
+            global_timer <= global_timer + 1'b1;
+    end
+
+    // =========================================================================
+    // 3. Submodule Interconnect Wires & Registers
     // =========================================================================
     // L1 TLB signals
     reg         l1_lookup_en;
@@ -79,8 +103,12 @@ module mmu_controller (
     wire        page_valid;
     wire        page_fault_wire;
 
+    // Frame Table signals
+    reg         ft_touch_en;
+    reg  [15:0] ft_touch_pfn;
+
     // =========================================================================
-    // 3. Submodule Instantiations
+    // 4. Submodule Instantiations
     // =========================================================================
     l1_tlb l1_tlb_inst (
         .clk(clk),
@@ -138,8 +166,35 @@ module mmu_controller (
         .write_valid(os_page_write_valid)
     );
 
+    frame_table #(
+        .PFN_WIDTH(16),
+        .NUM_FRAMES(NUM_FRAMES),
+        .PID_WIDTH(PID_WIDTH)
+    ) frame_table_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .query_pfn(ft_touch_pfn),
+        .query_frame_valid(),
+        .query_frame_pid(),
+        .query_last_used(),
+        // Allocates frame to current_pid when the OS updates the page table
+        .alloc_en(os_page_write_en),
+        .alloc_pfn(os_write_pfn),
+        .alloc_pid(current_pid),
+        // Frees frame when evicted by the OS
+        .free_en(os_frame_free_en),
+        .free_pfn(os_frame_free_pfn),
+        // Updates LRU timestamp on any hit
+        .touch_en(ft_touch_en),
+        .touch_pfn(ft_touch_pfn),
+        .access_timestamp(global_timer),
+        // Quota tracking
+        .quota_query_pid(quota_query_pid),
+        .quota_frame_count(quota_frame_count)
+    );
+
     // =========================================================================
-    // 4. Controller FSM Definition
+    // 5. Controller FSM Definition
     // =========================================================================
     localparam S_IDLE       = 3'd0,
                S_L1_CHECK   = 3'd1,
@@ -150,7 +205,7 @@ module mmu_controller (
 
     reg [2:0] state;
 
-    // Combinational enable assignments based on active state
+    // Combinational enable assignments
     always @(*) begin
         l1_lookup_en = (state == S_L1_CHECK);
         l2_lookup_en = (state == S_L2_CHECK);
@@ -158,7 +213,7 @@ module mmu_controller (
         pt_read_en   = (state == S_PAGE_CHECK);
     end
 
-    // Sequential state transitions and control actions
+    // Sequential state machine
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state        <= S_IDLE;
@@ -174,6 +229,8 @@ module mmu_controller (
             l2_write_en  <= 1'b0;
             l2_write_vpn <= 15'd0;
             l2_write_pfn <= 16'd0;
+            ft_touch_en  <= 1'b0;
+            ft_touch_pfn <= 16'd0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -182,6 +239,7 @@ module mmu_controller (
                     seg_fault   <= 1'b0;
                     l1_write_en <= 1'b0;
                     l2_write_en <= 1'b0;
+                    ft_touch_en <= 1'b0;
 
                     if (start_translate) begin
                         va_reg <= va_in;
@@ -194,20 +252,19 @@ module mmu_controller (
 
                 S_L1_CHECK: begin
                     if (l1_hit) begin
-                        // L1 TLB Hit: Translation resolved in 1 cycle
-                        pa_out   <= {l1_pfn, offset};
-                        pa_ready <= 1'b1;
-                        busy     <= 1'b0;
-                        state    <= S_DONE;
+                        pa_out       <= {l1_pfn, offset};
+                        pa_ready     <= 1'b1;
+                        busy         <= 1'b0;
+                        ft_touch_en  <= 1'b1;
+                        ft_touch_pfn <= l1_pfn;
+                        state        <= S_DONE;
                     end else begin
-                        // L1 TLB Miss: Query L2 TLB next
-                        state    <= S_L2_CHECK;
+                        state        <= S_L2_CHECK;
                     end
                 end
 
                 S_L2_CHECK: begin
                     if (l2_hit) begin
-                        // L2 TLB Hit: Refill L1 TLB and complete
                         pa_out       <= {l2_pfn, offset};
                         pa_ready     <= 1'b1;
                         busy         <= 1'b0;
@@ -216,33 +273,31 @@ module mmu_controller (
                         l1_write_vpn <= vpn;
                         l1_write_pfn <= l2_pfn;
 
+                        ft_touch_en  <= 1'b1;
+                        ft_touch_pfn <= l2_pfn;
+
                         state        <= S_DONE;
                     end else begin
-                        // L2 TLB Miss: Begin main memory table walk
                         state        <= S_SEG_CHECK;
                     end
                 end
 
                 S_SEG_CHECK: begin
                     if (seg_fault_wire) begin
-                        // Segment invalid: Trigger segmentation fault
                         seg_fault <= 1'b1;
                         busy      <= 1'b0;
                         state     <= S_DONE;
                     end else if (seg_valid) begin
-                        // Segment valid: Query page table with pt_base_addr
                         state     <= S_PAGE_CHECK;
                     end
                 end
 
                 S_PAGE_CHECK: begin
                     if (page_fault_wire) begin
-                        // Page unmapped: Trigger page fault
                         page_fault <= 1'b1;
                         busy       <= 1'b0;
                         state      <= S_DONE;
                     end else if (page_valid) begin
-                        // Page Table Hit: Refill both L1 and L2 TLBs
                         pa_out       <= {page_pfn, offset};
                         pa_ready     <= 1'b1;
                         busy         <= 1'b0;
@@ -255,17 +310,20 @@ module mmu_controller (
                         l2_write_vpn <= vpn;
                         l2_write_pfn <= page_pfn;
 
+                        ft_touch_en  <= 1'b1;
+                        ft_touch_pfn <= page_pfn;
+
                         state        <= S_DONE;
                     end
                 end
 
                 S_DONE: begin
-                    // Clear single-cycle strobe signals
                     pa_ready    <= 1'b0;
                     page_fault  <= 1'b0;
                     seg_fault   <= 1'b0;
                     l1_write_en <= 1'b0;
                     l2_write_en <= 1'b0;
+                    ft_touch_en <= 1'b0;
                     state       <= S_IDLE;
                 end
 
