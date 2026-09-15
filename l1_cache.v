@@ -85,6 +85,41 @@ module l1_cache #(
     wire [1:0] cur_fill_word = filling ? fill_word : 2'b00;
 
     // --------------------------------------------------
+    // Write buffer
+    // --------------------------------------------------
+    // Write hits are pushed here instead of being pulsed onto
+    // the L2 bus directly, so a write is never lost just because
+    // L2 wasn't ready the exact cycle of the hit. The buffer is
+    // drained to L2 in the background (see the main always block)
+    // whenever the bus isn't busy with a line fill.
+
+    reg draining;
+    reg buf_consume;
+
+    wire buf_full;
+    wire buf_consume_valid;
+    wire [ADDR_WIDTH-1:0] buf_consume_addr;
+    wire [DATA_WIDTH-1:0] buf_consume_data;
+
+    wire hit_write_accept = cpu_valid && hit_found && cpu_write && !buf_full;
+
+    write_buffer #(
+        .ADDR_WIDTH(ADDR_WIDTH),
+        .DATA_WIDTH(DATA_WIDTH)
+    ) l1_wb (
+        .clk(clk),
+        .reset(reset),
+        .write_valid(hit_write_accept),
+        .write_addr(cpu_addr),
+        .write_data(cpu_write_data),
+        .full(buf_full),
+        .consume(buf_consume),
+        .consume_valid(buf_consume_valid),
+        .consume_addr(buf_consume_addr),
+        .consume_data(buf_consume_data)
+    );
+
+    // --------------------------------------------------
     // Search cache
     // --------------------------------------------------
 
@@ -125,6 +160,9 @@ module l1_cache #(
             filling <= 1'b0;
             fill_word <= 2'b00;
 
+            draining <= 1'b0;
+            buf_consume <= 1'b0;
+
             for (i = 0; i < SETS; i = i + 1) begin
                 valid[i][0] <= 0;
                 valid[i][1] <= 0;
@@ -139,14 +177,89 @@ module l1_cache #(
             cpu_hit <= 0;
             l2_valid <= 0;
             lru_access_valid <= 0;
+            buf_consume <= 0;
 
-            if (cpu_valid) begin
+            // The L2 bus is shared between line fills and write-buffer
+            // drains, so only one of the branches below runs per cycle.
+            // An in-progress fill always wins (it must not be
+            // interrupted mid-burst); a drain-in-progress is next;
+            // then a CPU hit (never stalled by a drain); then starting
+            // a new drain if the buffer has something to send; and
+            // finally starting a new miss fill.
+
+            if (filling) begin
+
+                // -------------------------------
+                // CONTINUE LINE FILL
+                // -------------------------------
+
+                l2_valid <= 1'b1;
+                l2_write <= 1'b0;
+                l2_addr <= {cpu_addr[ADDR_WIDTH-1:4], cur_fill_word, 2'b00};
+
+                if (l2_ready) begin
+
+                    tag[index][lru_way] <= tag_value;
+                    data[index][lru_way][cur_fill_word] <= l2_read_data;
+
+                    if (cur_fill_word == word_offset)
+                        cpu_read_data <= l2_read_data;
+
+                    if (cur_fill_word == 2'b11) begin
+
+                        valid[index][lru_way] <= 1'b1;
+                        filling <= 1'b0;
+
+                        // Read miss: done now. Write miss: don't
+                        // complete yet -- next cycle this address
+                        // now HITS (valid+tag match), so the
+                        // write-hit path below applies
+                        // cpu_write_data (write-allocate) instead
+                        // of the write being silently dropped.
+                        if (!cpu_write) begin
+                            cpu_ready <= 1'b1;
+                            lru_access_valid <= 1'b1;
+                            lru_access_way <= lru_way;
+                        end
+
+                    end
+                    else begin
+                        fill_word <= cur_fill_word + 1'b1;
+                    end
+
+                end
+
+            end
+
+            else if (draining) begin
+
+                // -------------------------------
+                // CONTINUE WRITE-BUFFER DRAIN
+                // -------------------------------
+
+                l2_valid <= 1'b1;
+                l2_write <= 1'b1;
+                l2_addr <= buf_consume_addr;
+                l2_write_data <= buf_consume_data;
+
+                if (l2_ready) begin
+                    draining <= 1'b0;
+                    buf_consume <= 1'b1;
+                end
+
+            end
+
+            else if (cpu_valid && hit_found) begin
 
                 // -------------------------------
                 // CACHE HIT
                 // -------------------------------
 
-                if (hit_found) begin
+                if (cpu_write && buf_full) begin
+                    // Write buffer is full -- stall this write and
+                    // retry next cycle instead of dropping it.
+                end
+                else begin
 
                     cpu_hit <= 1'b1;
                     cpu_ready <= 1'b1;
@@ -156,11 +269,9 @@ module l1_cache #(
                         data[index][hit_way][word_offset] <=
                             cpu_write_data;
 
-                        // Send write to L2 through write path
-                        l2_valid <= 1'b1;
-                        l2_write <= 1'b1;
-                        l2_addr <= cpu_addr;
-                        l2_write_data <= cpu_write_data;
+                        // Pushed into the write buffer via
+                        // hit_write_accept above; drained to L2 in
+                        // the background instead of sent directly.
 
                     end
                     else begin
@@ -175,56 +286,68 @@ module l1_cache #(
 
                 end
 
+            end
+
+            else if (buf_consume_valid) begin
+
                 // -------------------------------
-                // CACHE MISS
+                // START WRITE-BUFFER DRAIN
                 // -------------------------------
 
-                else begin
+                draining <= 1'b1;
 
-                    filling <= 1'b1;
+                l2_valid <= 1'b1;
+                l2_write <= 1'b1;
+                l2_addr <= buf_consume_addr;
+                l2_write_data <= buf_consume_data;
 
-                    l2_valid <= 1'b1;
-                    l2_write <= 1'b0;
-                    l2_addr <= {cpu_addr[ADDR_WIDTH-1:4], cur_fill_word, 2'b00};
+                if (l2_ready) begin
+                    draining <= 1'b0;
+                    buf_consume <= 1'b1;
+                end
 
-                    // Wait for L2
-                    if (l2_ready) begin
+            end
 
-                        // Fill this word of the line
-                        tag[index][lru_way] <= tag_value;
-                        data[index][lru_way][cur_fill_word] <= l2_read_data;
+            else if (cpu_valid && !hit_found) begin
 
-                        if (cur_fill_word == word_offset)
-                            cpu_read_data <= l2_read_data;
+                // -------------------------------
+                // START LINE FILL (CACHE MISS)
+                // -------------------------------
 
-                        if (cur_fill_word == 2'b11) begin
+                filling <= 1'b1;
 
-                            // Whole line is now valid
-                            valid[index][lru_way] <= 1'b1;
-                            filling <= 1'b0;
+                l2_valid <= 1'b1;
+                l2_write <= 1'b0;
+                l2_addr <= {cpu_addr[ADDR_WIDTH-1:4], cur_fill_word, 2'b00};
 
-                            // Read miss: done now. Write miss: don't
-                            // complete yet -- next cycle this address
-                            // now HITS (valid+tag match), so the
-                            // write-hit path above applies
-                            // cpu_write_data and forwards it to L2
-                            // (write-allocate), instead of the write
-                            // being silently dropped.
-                            if (!cpu_write) begin
-                                cpu_ready <= 1'b1;
-                                lru_access_valid <= 1'b1;
-                                lru_access_way <= lru_way;
-                            end
+                if (l2_ready) begin
 
-                        end
-                        else begin
-                            fill_word <= cur_fill_word + 1'b1;
+                    tag[index][lru_way] <= tag_value;
+                    data[index][lru_way][cur_fill_word] <= l2_read_data;
+
+                    if (cur_fill_word == word_offset)
+                        cpu_read_data <= l2_read_data;
+
+                    if (cur_fill_word == 2'b11) begin
+
+                        valid[index][lru_way] <= 1'b1;
+                        filling <= 1'b0;
+
+                        if (!cpu_write) begin
+                            cpu_ready <= 1'b1;
+                            lru_access_valid <= 1'b1;
+                            lru_access_way <= lru_way;
                         end
 
                     end
+                    else begin
+                        fill_word <= cur_fill_word + 1'b1;
+                    end
 
                 end
+
             end
+
         end
     end
 
