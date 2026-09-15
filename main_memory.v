@@ -23,8 +23,8 @@
 module main_memory(
     input clk,
     input reset,
-    input         memory_valid,
-    input         memory_write,
+    input          memory_valid,
+    input          memory_write,
     input  [25:0]  memory_addr,
     input  [31:0]  memory_write_data,
 
